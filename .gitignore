@@ -1,0 +1,15 @@
+# Environment
+venv/
+.env
+
+# MacOS
+.DS_Store
+
+# Caches
+__pycache__/
+
+# Packages
+*.egg-info/
+
+# Tests & Databases
+*.db
