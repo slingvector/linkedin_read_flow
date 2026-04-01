@@ -44,14 +44,30 @@ class VoyagerClient:
     def get_feed_posts(self, limit: int = 100) -> list[dict[str, Any]]:
         """
         Fetches own feed posts.
-        linkedin-api returns flat dicts with: url, content, author_name, author_profile.
+        linkedin-api returns flat dicts, but we intercept the raw JSON graph
+        to stitch Likes, Comments, and Media URLs natively.
         """
         logger.info(
             "Fetching feed posts", extra={"limit": limit, "client": "VoyagerClient"}
         )
         try:
-            raw = self._api.get_feed_posts(limit=limit)
-            posts = [self._normalise_feed_post(p) for p in (raw or [])]
+            raw_posts, raw_included = self._fetch_with_graph_stitching(
+                self._api.get_feed_posts, limit=limit
+            )
+            graph_assets = self._extract_graph_assets(raw_included)
+
+            posts = []
+            for rp in (raw_posts or []):
+                post = self._normalise_feed_post(rp)
+                urn = post["post_urn"]
+                
+                stats = graph_assets["stats"].get(urn, {"likes": 0, "comments": 0})
+                post["likes"] = stats["likes"]
+                post["comments"] = stats["comments"]
+                post["media_urls"] = graph_assets["media"].get(urn, [])
+                
+                posts.append(post)
+
             logger.info(
                 "Feed posts fetched",
                 extra={"count": len(posts), "client": "VoyagerClient"},
@@ -75,15 +91,29 @@ class VoyagerClient:
     ) -> list[dict[str, Any]]:
         """
         Fetches posts from a specific profile.
-        public_id is the vanity slug (e.g. 'john-doe') or numeric ID.
         """
         logger.info(
             "Fetching profile posts",
             extra={"public_id": public_id, "limit": limit, "client": "VoyagerClient"},
         )
         try:
-            raw = self._api.get_profile_posts(public_id=public_id, post_count=limit)
-            posts = [self._normalise_profile_post(p) for p in (raw or [])]
+            raw_posts, raw_included = self._fetch_with_graph_stitching(
+                self._api.get_profile_posts, public_id=public_id, post_count=limit
+            )
+            graph_assets = self._extract_graph_assets(raw_included)
+
+            posts = []
+            for rp in (raw_posts or []):
+                post = self._normalise_profile_post(rp)
+                urn = post["post_urn"]
+                
+                stats = graph_assets["stats"].get(urn, {"likes": 0, "comments": 0})
+                post["likes"] = stats["likes"]
+                post["comments"] = stats["comments"]
+                post["media_urls"] = graph_assets["media"].get(urn, [])
+                
+                posts.append(post)
+
             logger.info(
                 "Profile posts fetched",
                 extra={
@@ -275,6 +305,78 @@ class VoyagerClient:
     def _urn_from_url(url: str) -> str | None:
         match = re.search(r"(urn:li:(?:activity|ugcPost):\d+)", url)
         return match.group(1) if match else None
+
+    # ------------------------------------------------------------------
+    # Graph Stitching Engines
+    # ------------------------------------------------------------------
+
+    def _fetch_with_graph_stitching(self, api_call, *args, **kwargs) -> tuple:
+        """
+        Intercepts linkedin-api _fetch to extract the raw JSON graph.
+        Returns (parsed_linkedin_api_models, raw_included_nodes).
+        """
+        raw_included = []
+        original_fetch = self._api._fetch
+
+        def intercepted_fetch(*f_args, **f_kwargs):
+            res = original_fetch(*f_args, **f_kwargs)
+            try:
+                data = res.json()
+                if "included" in data:
+                    raw_included.extend(data["included"])
+            except Exception:
+                pass
+            return res
+
+        self._api._fetch = intercepted_fetch
+        try:
+            raw_posts = api_call(*args, **kwargs)
+        finally:
+            self._api._fetch = original_fetch
+
+        return raw_posts, raw_included
+
+    def _extract_graph_assets(self, raw_included: list[dict]) -> dict[str, Any]:
+        """
+        Scans the flattened Voyager graph for SocialActivityCounts and Media arrays.
+        Matches them up by their URNs.
+        """
+        stats_map = {}
+        media_map = {}
+        
+        for item in raw_included:
+            urn = item.get("urn")
+            obj_type = item.get("$type", "")
+            
+            # Extract Stats
+            if obj_type == "com.linkedin.voyager.feed.shared.SocialActivityCounts" and urn:
+                stats_map[urn] = {
+                    "likes": item.get("numLikes", 0),
+                    "comments": item.get("numComments", 0)
+                }
+                
+            # Extract Media / Images / Videos
+            elif obj_type in ["com.linkedin.voyager.feed.render.UpdateV2", "com.linkedin.voyager.feed.render.Update"]:
+                meta_urn = item.get("updateMetadata", {}).get("urn")
+                if meta_urn:
+                    media_urls = []
+                    
+                    # Look for carousels / images
+                    images = item.get("content", {}).get("images", [])
+                    for img in images:
+                        for attr in img.get("attributes", []):
+                            v_img = attr.get("vectorImage", {})
+                            if v_img.get("rootUrl"):
+                                media_urls.append(v_img["rootUrl"])
+                                
+                    # Look for videos
+                    video = item.get("content", {}).get("video", {})
+                    if video and video.get("url"):
+                        media_urls.append(video["url"])
+                    
+                    media_map[meta_urn] = media_urls
+
+        return {"stats": stats_map, "media": media_map}
 
 
 # ---------------------------------------------------------------------------
