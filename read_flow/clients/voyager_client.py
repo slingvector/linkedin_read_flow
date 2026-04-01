@@ -50,35 +50,31 @@ class VoyagerClient:
         logger.info(
             "Fetching feed posts", extra={"limit": limit, "client": "VoyagerClient"}
         )
-        try:
-            raw_posts, raw_included = self._fetch_with_graph_stitching(
-                self._api.get_feed_posts, limit=limit
-            )
-            graph_assets = self._extract_graph_assets(raw_included)
+        # Try block removed for debugging
+        raw_posts, raw_included = self._fetch_with_graph_stitching(
+            self._api.get_feed_posts, limit=limit
+        )
+        graph_assets = self._extract_graph_assets(raw_included)
 
-            posts = []
-            for rp in (raw_posts or []):
-                post = self._normalise_feed_post(rp)
-                urn = post["post_urn"]
-                
-                stats = graph_assets["stats"].get(urn, {"likes": 0, "comments": 0})
-                post["likes"] = stats["likes"]
-                post["comments"] = stats["comments"]
-                post["media_urls"] = graph_assets["media"].get(urn, [])
-                
-                posts.append(post)
+        posts = []
+        for rp in (raw_posts or []):
+            if not isinstance(rp, dict):
+                continue
+            post = self._normalise_feed_post(rp)
+            urn = post.get("post_urn")
+            
+            stats = graph_assets["stats"].get(urn, {"likes": 0, "comments": 0}) if urn else {"likes": 0, "comments": 0}
+            post["likes"] = stats.get("likes", 0)
+            post["comments"] = stats.get("comments", 0)
+            post["media_urls"] = graph_assets["media"].get(urn, []) if urn else []
+            
+            posts.append(post)
 
-            logger.info(
-                "Feed posts fetched",
-                extra={"count": len(posts), "client": "VoyagerClient"},
-            )
-            return posts
-        except Exception as exc:
-            logger.error(
-                "get_feed_posts failed",
-                extra={"error": str(exc), "client": "VoyagerClient"},
-            )
-            raise LinkedInClientError(f"Feed fetch failed: {exc}") from exc
+        logger.info(
+            "Feed posts fetched",
+            extra={"count": len(posts), "client": "VoyagerClient"},
+        )
+        return posts
 
     # ------------------------------------------------------------------
     # Profile posts
@@ -104,13 +100,15 @@ class VoyagerClient:
 
             posts = []
             for rp in (raw_posts or []):
+                if not isinstance(rp, dict):
+                    continue
                 post = self._normalise_profile_post(rp)
-                urn = post["post_urn"]
+                urn = post.get("post_urn")
                 
-                stats = graph_assets["stats"].get(urn, {"likes": 0, "comments": 0})
-                post["likes"] = stats["likes"]
-                post["comments"] = stats["comments"]
-                post["media_urls"] = graph_assets["media"].get(urn, [])
+                stats = graph_assets["stats"].get(urn, {"likes": 0, "comments": 0}) if urn else {"likes": 0, "comments": 0}
+                post["likes"] = stats.get("likes", 0)
+                post["comments"] = stats.get("comments", 0)
+                post["media_urls"] = graph_assets["media"].get(urn, []) if urn else []
                 
                 posts.append(post)
 
@@ -345,6 +343,9 @@ class VoyagerClient:
         media_map = {}
         
         for item in raw_included:
+            if not isinstance(item, dict):
+                continue
+                
             urn = item.get("urn")
             obj_type = item.get("$type", "")
             
@@ -361,8 +362,11 @@ class VoyagerClient:
                 if meta_urn:
                     media_urls = []
                     
+                    # Extract content node safely
+                    content = item.get("content") or {}
+                    
                     # Look for carousels / images
-                    images = item.get("content", {}).get("images", [])
+                    images = content.get("images") or []
                     for img in images:
                         for attr in img.get("attributes", []):
                             v_img = attr.get("vectorImage", {})
@@ -370,7 +374,7 @@ class VoyagerClient:
                                 media_urls.append(v_img["rootUrl"])
                                 
                     # Look for videos
-                    video = item.get("content", {}).get("video", {})
+                    video = content.get("video") or {}
                     if video and video.get("url"):
                         media_urls.append(video["url"])
                     
